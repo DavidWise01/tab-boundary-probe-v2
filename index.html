@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tab Boundary Probe v2</title>
+<style>
+  :root{
+    --bg:#07080b; --panel:#0d1016; --line:#1c2230;
+    --ink:#c7d0dd; --dim:#6b7689; --faint:#3a4252;
+    --ok:#3fd1a0; --leak:#e2b23c; --blocked:#e2615a; --breach:#ff7847;
+    --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--mono);font-size:13px;line-height:1.5}
+  body{padding:22px 18px 40px;
+    background-image:linear-gradient(var(--line) 1px,transparent 1px),linear-gradient(90deg,var(--line) 1px,transparent 1px);
+    background-size:34px 34px;background-position:center}
+  .wrap{max-width:880px;margin:0 auto}
+  header{border-bottom:1px solid var(--line);padding-bottom:14px;margin-bottom:16px}
+  h1{font-size:15px;letter-spacing:.14em;text-transform:uppercase;margin:0 0 6px;color:#eef2f8}
+  .sub{color:var(--dim);font-size:11.5px;letter-spacing:.03em;max-width:64ch}
+  .context{margin:14px 0;padding:11px 14px;border:1px solid var(--line);background:var(--panel);
+    border-left:3px solid var(--faint);font-size:12.5px}
+  .context b{letter-spacing:.04em}
+  .verdict{margin:0 0 22px;padding:12px 14px;border:1px solid var(--line);background:var(--panel);border-left:3px solid var(--faint)}
+  .verdict b{color:#eef2f8;letter-spacing:.04em}
+  .legend{display:flex;gap:14px;flex-wrap:wrap;margin:0 0 18px;font-size:11px;color:var(--dim)}
+  .legend span{display:inline-flex;align-items:center;gap:6px}
+  .dot{width:9px;height:9px;border-radius:2px;display:inline-block}
+  .d-ok{background:var(--ok)} .d-leak{background:var(--leak)} .d-blocked{background:var(--blocked)} .d-breach{background:var(--breach)}
+  .group{margin:0 0 20px}
+  .group h2{font-size:11px;letter-spacing:.18em;text-transform:uppercase;color:var(--dim);margin:0 0 8px;border-bottom:1px solid var(--line);padding-bottom:6px}
+  .row{padding:9px 0;border-bottom:1px solid #11151d}
+  .row:last-child{border-bottom:none}
+  .top{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+  .tag{font-size:9.5px;letter-spacing:.12em;padding:2px 6px;border-radius:3px;text-transform:uppercase;font-weight:600;white-space:nowrap}
+  .t-ok{color:#06281d;background:var(--ok)}
+  .t-leak{color:#2c2106;background:var(--leak)}
+  .t-blocked{color:#2a0c0a;background:var(--blocked)}
+  .t-breach{color:#2a0c04;background:var(--breach)}
+  .label{color:var(--ink);font-size:12.5px}
+  .api{color:var(--faint);font-size:11px}
+  .val{color:var(--dim);font-size:11.5px;white-space:pre-wrap;word-break:break-word;margin-top:3px;border-left:2px solid #161b25;padding-left:8px}
+  .val.err{color:#caa}.val.hit{color:#cfe6db}.val.leakv{color:#e6d3a0}.val.breachv{color:#f3c0a3}
+  footer{margin-top:26px;color:var(--faint);font-size:10.5px;letter-spacing:.04em;line-height:1.7;border-top:1px solid var(--line);padding-top:12px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Tab Boundary Probe v2</h1>
+    <div class="sub">Same probes, but the verdict is now derived from what is measured — not assumed. The instrument first detects whether anything contains it, then judges each read in that light: reading your own frame is not a leak; piercing a real container is.</div>
+  </header>
+
+  <div class="context" id="context">detecting embedding context…</div>
+  <div class="verdict" id="verdict">running probes…</div>
+
+  <div class="legend">
+    <span><i class="dot d-ok"></i> READABLE — my own frame, legitimately mine</span>
+    <span><i class="dot d-leak"></i> LEAK — describes the host machine, escapes everywhere</span>
+    <span><i class="dot d-breach"></i> BREACH — a real container, pierced</span>
+    <span><i class="dot d-blocked"></i> BLOCKED — a wall held</span>
+  </div>
+
+  <div id="out"></div>
+  <footer id="foot"></footer>
+</div>
+
+<script>
+(function(){
+  // Identity comparison only — safe across origins, never touches a cross-origin property.
+  const embedded = (window.parent !== window) || (window.top !== window);
+
+  const out = document.getElementById('out');
+  const groups = {};
+  const counts = {readable:0, leak:0, breach:0, blocked:0};
+
+  // category: 'own' (my frame), 'wall' (the container — outcome depends on context), 'fingerprint' (the host machine)
+  function probe(group, label, api, category, fn){
+    let gotValue=false, valText, state;
+    try { const v=fn(); gotValue=true; valText=(v===undefined||v===null||v==='')?'(empty)':String(v); }
+    catch(e){ valText=e.name+': '+e.message; }
+
+    if(!gotValue){ state='blocked'; }
+    else if(category==='own'){ state='readable'; }
+    else if(category==='fingerprint'){ state='leak'; }
+    else { // 'wall'
+      state = embedded ? 'breach' : 'readable';
+      if(!embedded) valText += '   ← no container; this is me reading myself';
+    }
+    counts[state]++;
+    render(group, label, api, state, valText);
+  }
+
+  const TAG={readable:['t-ok','readable','hit'],leak:['t-leak','leak','leakv'],
+             breach:['t-breach','breach','breachv'],blocked:['t-blocked','blocked','err']};
+  function render(group,label,api,state,valText){
+    if(!groups[group]){const g=document.createElement('div');g.className='group';g.innerHTML='<h2>'+group+'</h2>';out.appendChild(g);groups[group]=g;}
+    const [tagCls,tagTxt,valCls]=TAG[state];
+    const r=document.createElement('div');r.className='row';
+    r.innerHTML='<div class="top"><span class="tag '+tagCls+'">'+tagTxt+'</span>'
+      +'<span class="label">'+label+'</span><span class="api">'+api+'</span></div>';
+    const val=document.createElement('div');val.className='val '+valCls;val.textContent=valText;
+    r.appendChild(val);groups[group].appendChild(r);
+  }
+
+  // ---- MY OWN FRAME ----
+  probe('My own frame','Am I top-level or embedded?','window.parent === window','own',
+    ()=> embedded ? 'embedded in a parent frame' : 'top-level (nothing contains me)');
+  probe('My own frame','My own document','document.title / nodes','own',
+    ()=> 'title="'+document.title+'", '+document.getElementsByTagName('*').length+' DOM nodes');
+  probe('My own frame','My own URL','window.location.href','own',()=> window.location.href);
+  probe('My own frame','Origin','window.location.origin','own',()=> window.location.origin);
+  probe('My own frame','window.name','window.name','own',()=> window.name);
+  probe('My own frame','My viewport','innerWidth × innerHeight','own',
+    ()=> window.innerWidth+' × '+window.innerHeight);
+
+  // ---- THE CONTAINER ----
+  probe('The container','Top frame URL — the tab address','window.top.location.href','wall',()=> window.top.location.href);
+  probe('The container','Parent page DOM','parent.document.title','wall',()=> parent.document.title);
+  probe('The container','Parent origin','parent.location.origin','wall',()=> parent.location.origin);
+  probe('The container','Ancestor frame origins','location.ancestorOrigins','wall',
+    ()=>{const a=window.location.ancestorOrigins; if(!a) throw new Error('not supported in this engine');
+         return Array.from(a).join('  ◂  ')||'(none — I am top-level)';});
+  probe('The container','Tab cookies','document.cookie','wall',
+    ()=>{const c=document.cookie; return c===''?'(empty)':c;});
+  probe('The container','localStorage','window.localStorage','wall',
+    ()=>{const t='__p'+Date.now();localStorage.setItem(t,'1');const r=localStorage.getItem(t);localStorage.removeItem(t);return 'writable — read back "'+r+'"';});
+  probe('The container','sessionStorage','window.sessionStorage','wall',
+    ()=>{const t='__p'+Date.now();sessionStorage.setItem(t,'1');const r=sessionStorage.getItem(t);sessionStorage.removeItem(t);return 'writable — read back "'+r+'"';});
+
+  // ---- THE HOST MACHINE (leaks in every context) ----
+  probe('The host machine','Full screen resolution','screen.width × screen.height','fingerprint',
+    ()=> screen.width+' × '+screen.height+'  (whole display)');
+  probe('The host machine','Pixel density','devicePixelRatio','fingerprint',()=> window.devicePixelRatio);
+  probe('The host machine','Timezone','Intl…timeZone','fingerprint',
+    ()=> Intl.DateTimeFormat().resolvedOptions().timeZone+'  (≈ region)');
+  probe('The host machine','Language','navigator.language','fingerprint',
+    ()=> navigator.language+'  ['+(navigator.languages||[]).join(', ')+']');
+  probe('The host machine','CPU threads','navigator.hardwareConcurrency','fingerprint',()=> navigator.hardwareConcurrency+' cores');
+  probe('The host machine','Device memory','navigator.deviceMemory','fingerprint',
+    ()=> navigator.deviceMemory?navigator.deviceMemory+' GB (coarse)':'not exposed');
+  probe('The host machine','Platform / UA','navigator.userAgent','fingerprint',()=> navigator.userAgent);
+  probe('The host machine','Color scheme','matchMedia(prefers-color-scheme)','fingerprint',
+    ()=> window.matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');
+  probe('The host machine','How I got here','document.referrer','fingerprint',()=> document.referrer);
+  probe('The host machine','Focus / visibility','hasFocus() / visibilityState','fingerprint',
+    ()=> 'hasFocus='+document.hasFocus()+', visibility='+document.visibilityState);
+  probe('The host machine','History depth','window.history.length','fingerprint',
+    ()=> window.history.length+' entries (count only)');
+
+  // ---- CONTEXT + COMPUTED VERDICT ----
+  document.getElementById('context').innerHTML = embedded
+    ? '<b style="color:var(--blocked)">Embedding context: SANDBOXED / EMBEDDED.</b> Something contains this frame. A wall should exist — the probes below test whether it holds.'
+    : '<b style="color:var(--ok)">Embedding context: TOP-LEVEL DOCUMENT.</b> Nothing contains this frame. There is no wall to test, because the frame and the tab are the same object.';
+
+  let v;
+  if(!embedded){
+    v = '<b>Verdict — no container.</b> I am the top-level document. The tab and I are one object, so every "reach into the tab" was just me reading myself ('
+      + counts.readable + ' readable, ' + counts.blocked + ' blocked). The boundary you may have seen elsewhere was never mine — it belonged to whatever embedded me. What still escapes is the host machine ('
+      + counts.leak + ' fingerprint signals: screen, timezone, CPU, locale, UA). Those leak in every context, contained or not. Nothing is sealed here because nothing seals me.';
+  } else if(counts.breach>0){
+    v = '<b style="color:var(--breach)">Verdict — container pierced.</b> A real container exists, yet ' + counts.breach
+      + ' read(s) reached past it and returned data. That is a genuine boundary failure, not a self-read. Walls that held: ' + counts.blocked
+      + '. Host fingerprint leaks: ' + counts.leak + '.';
+  } else {
+    v = '<b>Verdict — the wall holds.</b> A container exists and ' + counts.blocked
+      + ' attempt(s) to read past it threw and returned nothing. I see my own frame ('
+      + counts.readable + ' reads) and the host machine ('
+      + counts.leak + ' fingerprint leaks), but not the tab\'s contents. The frame cannot witness its own container.';
+  }
+  document.getElementById('verdict').innerHTML = v;
+
+  document.getElementById('foot').textContent =
+    'Tally — readable: '+counts.readable+'   leak: '+counts.leak+'   breach: '+counts.breach+'   blocked: '+counts.blocked
+    + '   ·   embedded='+embedded+'.  The wall is not in this code; it is imposed by whoever holds the frame. '
+    + 'Run me top-level and it vanishes; run me in a cross-origin sandbox and it returns. That movement — not any single tally — is the measurement.';
+})();
+</script>
+</body>
+</html>
